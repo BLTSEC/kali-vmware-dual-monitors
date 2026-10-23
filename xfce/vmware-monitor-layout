@@ -1,0 +1,134 @@
+#!/usr/bin/python3 -I
+"""Local Xfce/X11 VMware fix: follow host hints and reset added outputs."""
+import fcntl
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+
+POLL_SECONDS = 2
+SETTLE_SECONDS = 3
+
+
+def run(*args):
+    return subprocess.run(args, capture_output=True, text=True, check=True,
+                          timeout=12).stdout
+
+
+def layout(text):
+    """Return validated commands/signature; never apply overlapping hints."""
+    outputs = {}
+    current = None
+    for line in text.splitlines():
+        header = re.match(r'^(\S+) (connected|disconnected)(.*)', line)
+        if header:
+            current = None
+            if header[2] == 'connected':
+                current = outputs.setdefault(header[1], {'modes': []})
+        elif current is not None:
+            hint = re.match(r'\s+suggested ([XY]):\s*(-?\d+)', line)
+            mode = re.match(r'\s+(\d+)x(\d+)\s+(.+)', line)
+            if hint:
+                current[hint[1]] = int(hint[2])
+            if mode:
+                current['modes'].append((int(mode[1]), int(mode[2]), '+' in mode[3]))
+    if not outputs or len(outputs) > 2 or any(not re.fullmatch(r'Virtual-[12]', n) for n in outputs):
+        raise ValueError('Expected one or two VMware virtual outputs')
+    maximum = re.search(r'maximum (\d+) x (\d+)', text)
+    if not maximum:
+        raise ValueError('Missing framebuffer bounds')
+    maxw, maxh = map(int, maximum.groups())
+    signature, rectangles, args = [], [], ['xrandr']
+    for name, item in sorted(outputs.items()):
+        if not item['modes']:
+            raise ValueError('Missing output modes')
+        width, height, _ = next((m for m in item['modes'] if m[2]), item['modes'][0])
+        if len(outputs) > 1 and not {'X', 'Y'} <= item.keys():
+            raise ValueError('Missing VMware position hints')
+        x, y = (item['X'], item['Y']) if len(outputs) > 1 else (0, 0)
+        if x < 0 or y < 0 or x + width > maxw or y + height > maxh:
+            raise ValueError('Host layout exceeds framebuffer bounds')
+        rectangles.append((x, y, x + width, y + height))
+        signature.append((name, x, y, width, height))
+        args += ['--output', name, '--mode', f'{width}x{height}', '--pos', f'{x}x{y}']
+        if name == 'Virtual-1':
+            args.append('--primary')
+    if len(rectangles) == 2:
+        a, b = rectangles
+        if max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3]):
+            raise ValueError('Host hints overlap; waiting for hotplug to settle')
+    for name in ('Virtual-1', 'Virtual-2'):
+        if name not in outputs:
+            args += ['--output', name, '--off']
+    return tuple(signature), args
+
+
+def apply(args, reset):
+    if reset:
+        try:
+            run('xrandr', '--output', 'Virtual-2', '--off')
+            time.sleep(2)
+        finally:
+            # Re-enable even if the off command or sleep is interrupted.
+            run(*args)
+    else:
+        run(*args)
+
+
+def log(message):
+    print(time.strftime('%Y-%m-%d %H:%M:%S'), message, flush=True)
+
+
+def stop(signum, frame):
+    raise SystemExit(0)
+
+
+def main():
+    signal.signal(signal.SIGTERM, stop)
+    if os.environ.get('XDG_SESSION_TYPE') != 'x11' or 'XFCE' not in os.environ.get('XDG_CURRENT_DESKTOP', '').upper():
+        return
+    if run('systemd-detect-virt').strip() != 'vmware':
+        return
+    state = Path.home() / '.local/state/vmware-monitors'
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = (state / 'watcher.lock').open('w')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return
+    logfile = state / 'watcher.log'
+    if logfile.exists() and logfile.stat().st_size > 262144:
+        logfile.replace(state / 'watcher.log.old')
+    with logfile.open('a', buffering=1) as stream:
+        sys.stdout = sys.stderr = stream
+        log(f'Starting monitor watcher (pid {os.getpid()}); no DPI or saved profile changes')
+        applied = None
+        previous_error = None
+        while True:
+            try:
+                signature, args = layout(run('xrandr', '--prop'))
+                if signature != applied:
+                    time.sleep(SETTLE_SECONDS)
+                    settled, settled_args = layout(run('xrandr', '--prop'))
+                    if settled != signature:
+                        continue
+                    old_names = {item[0] for item in applied or ()}
+                    new_names = {item[0] for item in signature}
+                    reset = 'Virtual-2' in new_names - old_names
+                    apply(settled_args, reset)
+                    applied = signature
+                    log(f'Applied {signature}; reset extra output: {reset}')
+                previous_error = None
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                message = str(exc)
+                if message != previous_error:
+                    log('Waiting/retrying: ' + message)
+                previous_error = message
+            time.sleep(POLL_SECONDS)
+
+
+if __name__ == '__main__':
+    main()

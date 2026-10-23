@@ -1,0 +1,76 @@
+#!/usr/bin/python3 -I
+"""KDE Wayland + VMware: fix monitor layout when VMware adds screens.
+
+When "Cycle multiple monitors" connects extra virtual screens, KWin
+restores its saved layout too early and VMware shows the same screen on
+every monitor. Re-enabling the extra screens a few seconds later fixes
+it. Each screen is placed at VMware's suggested position (divided by the
+scale, since KWin positions are in scaled units) so the cursor lines up.
+"""
+import glob
+import json
+import os
+import subprocess
+import time
+
+SETTLE_SECONDS = 3
+
+
+def connected():
+    names = set()
+    for path in glob.glob("/sys/class/drm/card*-Virtual-*"):
+        with open(os.path.join(path, "status")) as f:
+            if f.read().strip() == "connected":
+                names.add(path.split("-", 1)[1])
+    return names
+
+
+def suggested_positions():
+    # Connectors are listed in order: index 0 is Virtual-1, and so on.
+    info = json.loads(subprocess.run(["drm_info", "-j"], capture_output=True,
+                                     text=True, check=True).stdout)
+    pos = {}
+    for dev in info.values():
+        for i, c in enumerate(dev["connectors"]):
+            if c["status"] == 1:
+                p = c["properties"]
+                pos[f"Virtual-{i + 1}"] = (p["suggested X"]["value"],
+                                           p["suggested Y"]["value"])
+    return pos
+
+
+def apply_layout(new):
+    kd = lambda *a: subprocess.run(["kscreen-doctor", *a],
+                                   capture_output=True)
+    outputs = json.loads(subprocess.run(["kscreen-doctor", "-j"],
+                                        capture_output=True,
+                                        text=True).stdout)["outputs"]
+    scale = {o["name"]: o["scale"] for o in outputs}
+    # Every screen uses the primary's scale; mixed scales break the cursor.
+    s = scale.get("Virtual-1", 1)
+    if new:
+        kd(*[f"output.{n}.disable" for n in new])
+        time.sleep(2)
+    args = []
+    for name, (x, y) in suggested_positions().items():
+        args += [f"output.{name}.enable", f"output.{name}.scale.{s}",
+                 f"output.{name}.position.{round(x / s)},{round(y / s)}"]
+    kd(*args, "output.Virtual-1.priority.1")
+
+
+def main():
+    if os.environ.get("XDG_SESSION_TYPE") != "wayland":
+        return
+    prev = connected()
+    while True:
+        time.sleep(2)
+        now = connected()
+        added = now - prev
+        if added:
+            time.sleep(SETTLE_SECONDS)
+            apply_layout(added)
+        prev = now
+
+
+if __name__ == "__main__":
+    main()

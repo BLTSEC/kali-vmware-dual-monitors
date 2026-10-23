@@ -1,0 +1,10 @@
+#!/bin/sh
+# Place each connected VMware virtual monitor at the position the host
+# suggests (driver "suggested X/Y"), so the guest layout matches VMware's
+# mouse mapping. Safe to run anytime under X11.
+args=$(xrandr --prop | awk '
+  /^[A-Za-z0-9-]+ (connected|disconnected)/ { out=$1; conn=($2=="connected") }
+  conn && /suggested X:/ { x[out]=$3 }
+  conn && /suggested Y:/ { y[out]=$3 }
+  END { for (o in x) printf "--output %s --auto --pos %sx%s ", o, x[o], y[o] }')
+[ -n "$args" ] && xrandr $args

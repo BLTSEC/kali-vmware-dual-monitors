@@ -1,0 +1,4 @@
+#!/bin/sh
+# SDDM display setup: run the stock Xsetup, then fix VMware monitor layout.
+/usr/share/sddm/scripts/Xsetup
+/usr/local/bin/vmware-monitor-layout
