@@ -6,6 +6,8 @@ Fixes two-monitor Kali guests on VMware Workstation when **Cycle Multiple Monito
 
 Write-up: [Fixing Kali Dual Monitors on VMware Workstation](https://bltsec.com/blog/kali-vmware-dual-monitors/)
 
+On Parallels Desktop for macOS instead? Black full-screen monitors there are a different problem: see [kali-parallels-dual-monitors](https://github.com/BLTSEC/kali-parallels-dual-monitors).
+
 ## Why
 
 - VMware reports where each virtual screen sits through the `vmwgfx` `suggested X/Y` properties, and maps the mouse with that layout. The guest has to use the same positions. Name order (`Virtual-1` left) is often wrong.
